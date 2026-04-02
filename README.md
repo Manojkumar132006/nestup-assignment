@@ -1,36 +1,198 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# NestUp — Work Process Tracker
+
+A Next.js work management app with a calendar view, dependency tracking, and role-based access. Built with Firebase Auth + Firestore, but architected so the database can be swapped without touching any component or page code.
+
+---
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment Variables
 
-## Learn More
+Copy `.env.example` to `.env` and fill in your Firebase project values:
 
-To learn more about Next.js, take a look at the following resources:
+```env
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+All variables are prefixed `NEXT_PUBLIC_` because Firebase is initialised on the client.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Project Structure
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+app/
+  page.tsx                  # Home — WorkCalendar (requires auth)
+  console/
+    page.tsx                # Admin — members list
+    [uid]/page.tsx          # Admin — member detail
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+components/
+  TopBar.tsx                # Nav bar with auth controls
+  WorkCalendar.tsx          # Main calendar + work CRUD
+  MemberDashboard.tsx       # Per-member stats and work list
+
+lib/
+  firebase.ts               # Firebase app / auth / db initialisation
+  auth-context.tsx          # AuthProvider + useAuth hook
+  user-model.ts             # UserProfile type
+  work-model.ts             # Work types + public API (thin facade)
+  dependency-model.ts       # Dependency types, graph algorithms, public API
+  users-service.ts          # User mutations + queries (thin facade)
+
+  db/
+    types.ts                # ← Repository interfaces (the migration contract)
+    index.ts                # ← Active implementation (swap here to migrate)
+    firestore/
+      user-repo.ts          # Firestore: IUserRepository
+      work-repo.ts          # Firestore: IWorkRepository
+      dependency-repo.ts    # Firestore: IDependencyRepository
+```
+
+---
+
+## Architecture — Database Abstraction Layer
+
+All database access goes through three repository interfaces defined in `lib/db/types.ts`:
+
+| Interface | Responsibility |
+|---|---|
+| `IUserRepository` | Upsert user on login, update skills/role, list all users |
+| `IWorkRepository` | Real-time subscription, CRUD for work items |
+| `IDependencyRepository` | Real-time subscription, CRUD + cycle validation for dependencies |
+
+The active implementations are wired up in **`lib/db/index.ts`**:
+
+```ts
+// lib/db/index.ts — the only file you change when migrating
+
+export const userRepo       = new FirestoreUserRepository();
+export const workRepo       = new FirestoreWorkRepository();
+export const dependencyRepo = new FirestoreDependencyRepository();
+```
+
+Model files (`work-model.ts`, `dependency-model.ts`, `users-service.ts`) are thin facades that call these repo instances. Components never import from `lib/db/` directly — they only use the model/service public APIs.
+
+---
+
+## Migrating to MongoDB
+
+1. Create `lib/db/mongodb/` and implement the three interfaces:
+
+```ts
+// lib/db/mongodb/user-repo.ts
+import { IUserRepository } from "../types";
+
+export class MongoUserRepository implements IUserRepository {
+  async syncUser(firebaseUser) { /* ... */ }
+  async updateSkills(uid, skills) { /* ... */ }
+  async updateRole(uid, role) { /* ... */ }
+  async getAllUsers() { /* ... */ }
+}
+```
+
+Do the same for `MongoWorkRepository` and `MongoDependencyRepository`.
+
+> For real-time subscriptions (`subscribe()` on Work and Dependency repos), MongoDB Change Streams are the direct equivalent of Firestore `onSnapshot`. If you use a REST/API-route approach instead, you can poll or use Server-Sent Events — the interface just requires returning an unsubscribe function.
+
+2. Swap the imports in `lib/db/index.ts`:
+
+```ts
+import { MongoUserRepository }       from "./mongodb/user-repo";
+import { MongoWorkRepository }       from "./mongodb/work-repo";
+import { MongoDependencyRepository } from "./mongodb/dependency-repo";
+
+export const userRepo       = new MongoUserRepository();
+export const workRepo       = new MongoWorkRepository();
+export const dependencyRepo = new MongoDependencyRepository();
+```
+
+3. Done. No component, page, or model file needs to change.
+
+---
+
+## Data Models
+
+### UserProfile
+
+| Field | Type | Notes |
+|---|---|---|
+| `uid` | `string` | Firebase Auth UID |
+| `email` | `string` | |
+| `displayName` | `string \| null` | |
+| `photoURL` | `string \| null` | |
+| `role` | `"admin" \| "user"` | |
+| `skills` | `string[]` | |
+| `createdAt` / `updatedAt` | `unknown` | DB-native timestamp |
+
+### Work
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | Generated by DB |
+| `name` | `string` | |
+| `assignedTo` | `string` | User UID |
+| `priority` | `"low" \| "medium" \| "high" \| "critical"` | |
+| `progress` | `number` | 0–100 |
+| `status` | `"blocked" \| "in-progress" \| "done"` | |
+| `dueDate` | `string` | ISO date `YYYY-MM-DD` |
+| `createdAt` / `updatedAt` | `unknown` | DB-native timestamp |
+
+### Dependency
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | Generated by DB |
+| `fromId` | `string` | Upstream work item ID |
+| `toId` | `string` | Dependent work item ID |
+| `type` | `"partial" \| "full"` | |
+| `threshold` | `number` | 0–100; always 100 for `full` |
+| `createdAt` / `updatedAt` | `unknown` | DB-native timestamp |
+
+---
+
+## Dependency Graph
+
+Cycle detection runs before every `createDependency` and `updateDependency` call:
+
+- `wouldCreateCycle()` — iterative DFS, O(V+E)
+- `findCycles()` — Tarjan's SCC algorithm, returns all cycles
+- `resolveCircularDependencies()` — auto-removes the lexicographically largest dep ID in each cycle
+
+These are pure functions in `lib/dependency-model.ts` with no DB dependency, so they work identically regardless of which backend is active.
+
+---
+
+## Auth Flow
+
+1. User clicks "Sign in with Google" → Firebase `signInWithPopup`
+2. `onAuthStateChanged` fires → `syncUserToDb()` upserts the profile
+3. `AuthProvider` stores `user`, `userProfile`, `role`, `loading` in context
+4. `useAuth()` hook exposes these to any component
+
+Role `"admin"` unlocks: Console pages, work creation/editing, assigning work to members.
+
+---
+
+## Scripts
+
+```bash
+npm run dev      # development server (http://localhost:3000)
+npm run build    # production build
+npm run start    # serve production build
+npm run lint     # ESLint
+```

@@ -14,7 +14,8 @@ import {
   signOut,
 } from "firebase/auth";
 import { auth, googleProvider } from "./firebase";
-import { UserProfile, UserRole, syncUserToDb } from "./user-model";
+import { UserProfile, UserRole } from "./user-model";
+import { syncUserToDb } from "./users-service";
 
 export type Role = UserRole;
 
@@ -36,17 +37,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
-        const profile = await syncUserToDb(firebaseUser);
-        setUserProfile(profile);
-        setRole(profile.role ?? "user");
+        // Unblock the UI immediately — profile sync happens in the background
+        setLoading(false);
+        syncUserToDb(firebaseUser).then((profile) => {
+          setUserProfile(profile);
+          setRole(profile.role ?? "user");
+        });
       } else {
         setRole("user");
         setUserProfile(null);
+        setLoading(false);
       }
-      setLoading(false);
     });
     return unsubscribe;
   }, []);
